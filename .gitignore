@@ -1,0 +1,10 @@
+# Keep the repository source-only: NinjaTrader creates and maintains its own runtime directories.
+*.dll
+*.pdb
+*.obj
+*.exe
+bin/
+obj/
+.vs/
+*.suo
+.DS_Store
