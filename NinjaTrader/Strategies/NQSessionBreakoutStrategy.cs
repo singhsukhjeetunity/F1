@@ -1,22 +1,24 @@
 // NQSessionBreakoutStrategy.cs
-// Research/backtest companion to the original NQSessionBreakout indicator.
-// Does NOT invoke indicator virtual-trade logic: real strategy Position is authoritative.
-// Chart/platform time zone must be America/New_York (Eastern Time).
-// Requires 5-minute NQ/MNQ bars including the 09:30-09:35 NY opening bar.
+// Standalone chart-visible NQ/MNQ Strategy Analyzer research strategy.
+// Plots opening range and approximate RTH VWAP; draws signal brackets and actual fill markers.
+// Does NOT instantiate NQSessionBreakout indicator (avoids duplicate indicator dependency).
 //
 // Research limitations:
-// - Uses cumulative typical-price * 5-minute-volume VWAP approximation (not tick VWAP).
-// - Signals at confirmed bar close; market entries fill on the NEXT bar/tick in a backtest.
-// - Stops and targets reference the SIGNAL BAR CLOSE, not necessarily the eventual fill.
-// - Test with realistic data, commissions, slippage and intrabar fill resolution.
-// - NOT validated for unattended live execution or any prop-firm compliance.
+// - Bar HLC3 * volume approximates VWAP, not tick-accurate transaction VWAP.
+// - OnBarClose signals normally execute at next-bar fills, NOT at signal-bar close.
+// - Stop/target price levels are based on the signal-bar close and may differ from realized R.
+// - NinjaTrader chart/platform time zone must be Eastern / America/New_York.
+// - Requires 5-minute data containing a complete 09:30-09:35 ET opening bar.
+// - Research only: NOT approved for live prop-firm automation.
 
 using System;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
+using System.Windows.Media;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.DrawingTools;
 
 namespace NinjaTrader.NinjaScript.Strategies
 {
@@ -29,16 +31,41 @@ namespace NinjaTrader.NinjaScript.Strategies
         private double sumPriceVolume;
         private double sumVolume;
         private int entriesToday;
-        private int firstDirection; // 1 = long, -1 = short
+        private int firstDirection; // +1 long, -1 short
         private int lastExitBar = -1;
+
+        // Drawings belong to this strategy and are separate from the indicator.
+        // The plotted entry is the *planned signal close*, not the actual execution fill.
+        private string activeTradeTag = "";
+        private int activeSignalBar = -1;
+        private int activeDirection;
+        private double plannedEntry;
+        private double plannedStop;
+        private double plannedTarget;
+        private double actualEntryFill = double.NaN;
+
+        // Execution notifications can occur between bar updates. Buffer markers
+        // and render them on the next OnBarUpdate; do not infer fills from OHLC.
+        private bool entryMarkerPending;
+        private DateTime entryFillTime;
+        private double entryFillPrice;
+        private string entryMarkerTag = "";
+
+        private bool exitMarkerPending;
+        private DateTime exitFillTime;
+        private double exitFillPrice;
+        private int exitFillResult;
+        private string exitMarkerTag = "";
 
         protected override void OnStateChange()
         {
             if (State == State.SetDefaults)
             {
                 Name = "NQSessionBreakoutStrategy";
-                Description = "Independent 5-minute NQ opening-range breakout with RTH approximate VWAP and 0.5R brackets.";
+                Description = "5-minute NQ opening-range breakout, RTH approximate VWAP, 0.5R brackets and chart visuals.";
                 Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+                DrawOnPricePanel = true;
                 EntriesPerDirection = 1;
                 EntryHandling = EntryHandling.UniqueEntries;
                 IsExitOnSessionCloseStrategy = true;
@@ -49,6 +76,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                 LastEntryTime = 153000;
                 FlattenTime = 155500;
                 MaxStopPoints = 0;
+                ShowVisuals = true;
+
+                // These are strategy-owned plots. No duplicate indicator required.
+                AddPlot(Brushes.DodgerBlue, "OpeningHigh");
+                AddPlot(Brushes.MediumPurple, "OpeningLow");
+                AddPlot(Brushes.Gold, "SessionVWAP");
             }
         }
 
@@ -65,6 +98,81 @@ namespace NinjaTrader.NinjaScript.Strategies
             lastExitBar = -1;
         }
 
+        // Update existing trade bracket drawings with the SAME tag each bar.
+        // Completed trade lines stop extending once an exit execution is reported.
+        private void DrawPlannedBracket(int lastBar)
+        {
+            if (!ShowVisuals || activeSignalBar < 0 || lastBar < activeSignalBar)
+                return;
+
+            int fromAgo = CurrentBar - activeSignalBar;
+            int toAgo = CurrentBar - lastBar;
+
+            Draw.Line(this, "F1_ENTRY_" + activeTradeTag,
+                fromAgo, plannedEntry, toAgo, plannedEntry, Brushes.SteelBlue);
+            Draw.Line(this, "F1_STOP_" + activeTradeTag,
+                fromAgo, plannedStop, toAgo, plannedStop, Brushes.Crimson);
+            Draw.Line(this, "F1_TARGET_" + activeTradeTag,
+                fromAgo, plannedTarget, toAgo, plannedTarget, Brushes.ForestGreen);
+        }
+
+        private void DrawSignal(int direction)
+        {
+            if (!ShowVisuals)
+                return;
+
+            if (direction == 1)
+                Draw.ArrowUp(this, "F1_LONG_" + activeTradeTag, false,
+                    0, Low[0] - 3 * TickSize, Brushes.LimeGreen);
+            else
+                Draw.ArrowDown(this, "F1_SHORT_" + activeTradeTag, false,
+                    0, High[0] + 3 * TickSize, Brushes.Red);
+
+            Draw.Text(this, "F1_LABEL_" + activeTradeTag,
+                direction == 1 ? "LONG 0.5R" : "SHORT 0.5R",
+                0,
+                direction == 1 ? Low[0] - 7 * TickSize : High[0] + 7 * TickSize,
+                direction == 1 ? Brushes.LimeGreen : Brushes.Red);
+
+            DrawPlannedBracket(CurrentBar);
+        }
+
+        private void RenderPendingExecutions()
+        {
+            if (ShowVisuals && entryMarkerPending)
+            {
+                Draw.Dot(this, "F1_FILL_" + entryMarkerTag, false,
+                    entryFillTime, entryFillPrice, Brushes.DeepSkyBlue);
+            }
+            entryMarkerPending = false;
+
+            if (exitMarkerPending)
+            {
+                if (ShowVisuals)
+                {
+                    // Bars.GetBar uses the historical bar that corresponds to the
+                    // execution timestamp; fall back to the current bar if needed.
+                    int endBar = Bars.GetBar(exitFillTime);
+                    if (endBar < activeSignalBar || endBar > CurrentBar)
+                        endBar = CurrentBar;
+
+                    DrawPlannedBracket(endBar);
+                    Brush resultBrush = exitFillResult > 0 ? Brushes.ForestGreen :
+                        exitFillResult < 0 ? Brushes.Crimson : Brushes.Orange;
+                    Draw.Dot(this, "F1_EXIT_" + exitMarkerTag, false,
+                        exitFillTime, exitFillPrice, resultBrush);
+                }
+                exitMarkerPending = false;
+                activeSignalBar = -1;
+                activeTradeTag = "";
+                actualEntryFill = double.NaN;
+            }
+            else if (activeSignalBar >= 0)
+            {
+                DrawPlannedBracket(CurrentBar);
+            }
+        }
+
         protected override void OnExecutionUpdate(
             Execution execution,
             string executionId,
@@ -78,12 +186,33 @@ namespace NinjaTrader.NinjaScript.Strategies
                 execution.Order.OrderState != OrderState.Filled)
                 return;
 
-            // Only a completed exit permits an opposite-side second entry.
-            // The new confirmation must also be from a later finished 5-minute bar.
             OrderAction action = execution.Order.OrderAction;
-            if ((action == OrderAction.Sell || action == OrderAction.BuyToCover) &&
-                marketPosition == MarketPosition.Flat)
+
+            if ((action == OrderAction.Buy || action == OrderAction.SellShort)
+                && marketPosition != MarketPosition.Flat)
+            {
+                actualEntryFill = price;
+                entryFillTime = time;
+                entryFillPrice = price;
+                entryMarkerTag = activeTradeTag;
+                entryMarkerPending = true;
+            }
+            else if ((action == OrderAction.Sell || action == OrderAction.BuyToCover)
+                && marketPosition == MarketPosition.Flat)
+            {
+                // Preserve the original rule gating: new opposite breakout must
+                // close on a subsequent five-minute bar after the exit.
                 lastExitBar = CurrentBar;
+
+                double basis = double.IsNaN(actualEntryFill)
+                    ? plannedEntry : actualEntryFill;
+                double pnlPoints = activeDirection * (price - basis);
+                exitFillResult = pnlPoints > 0 ? 1 : pnlPoints < 0 ? -1 : 0;
+                exitFillTime = time;
+                exitFillPrice = price;
+                exitMarkerTag = activeTradeTag;
+                exitMarkerPending = true;
+            }
         }
 
         protected override void OnBarUpdate()
@@ -91,13 +220,23 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (BarsInProgress != 0 || CurrentBar < 1)
                 return;
 
-            if (BarsPeriod.BarsPeriodType != BarsPeriodType.Minute || BarsPeriod.Value != 5)
+            if (BarsPeriod.BarsPeriodType != BarsPeriodType.Minute ||
+                BarsPeriod.Value != 5)
                 return;
+
+            // Clear plots on every bar to prevent connecting across dates or
+            // drawing invalid zero-valued levels outside the cash session.
+            Values[0][0] = double.NaN;
+            Values[1][0] = double.NaN;
+            Values[2][0] = double.NaN;
+
+            RenderPendingExecutions();
 
             int clock = ToTime(Time[0]);
             if (Time[0].Date != sessionDate)
                 ResetSession(Time[0].Date);
 
+            // NinjaTrader stamps the bar by its closing time in this series.
             if (clock == 93500)
             {
                 ResetSession(Time[0].Date);
@@ -109,17 +248,24 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (openingBar < 0 || clock < 93500)
                 return;
 
-            // VWAP approximation reset at the 09:30-09:35 NY candle.
+            // RTH-anchored HLC3 * bar-volume approximation of VWAP.
             if (clock <= 160000)
             {
                 double typical = (High[0] + Low[0] + Close[0]) / 3.0;
                 sumPriceVolume += typical * Volume[0];
                 sumVolume += Volume[0];
+
+                if (ShowVisuals)
+                {
+                    Values[0][0] = openingHigh;
+                    Values[1][0] = openingLow;
+                    if (sumVolume > 0)
+                        Values[2][0] = sumPriceVolume / sumVolume;
+                }
             }
 
-            // Research-only NY cash-session flatten safeguard.
-            // With OnBarClose, the exit is submitted after this bar's close,
-            // normally filling on the subsequent bar. Verify trading-hours template.
+            // No changes to trading conditions below: the drawing code is
+            // independent of the research strategy's entry/exit decisions.
             if (clock >= FlattenTime)
             {
                 if (Position.MarketPosition == MarketPosition.Long)
@@ -137,33 +283,47 @@ namespace NinjaTrader.NinjaScript.Strategies
                 lastExitBar >= CurrentBar)
                 return;
 
-            // Require a fresh, strict cross, not just a wick touching the level.
             double vwap = sumPriceVolume / sumVolume;
-            bool goLong = Close[1] <= openingHigh && Close[0] > openingHigh && Close[0] > vwap;
-            bool goShort = Close[1] >= openingLow && Close[0] < openingLow && Close[0] < vwap;
+            bool goLong = Close[1] <= openingHigh &&
+                Close[0] > openingHigh && Close[0] > vwap;
+            bool goShort = Close[1] >= openingLow &&
+                Close[0] < openingLow && Close[0] < vwap;
+
             int direction = goLong ? 1 : goShort ? -1 : 0;
-            if (direction == 0 || (entriesToday == 1 && direction == firstDirection))
+            if (direction == 0 ||
+                (entriesToday == 1 && direction == firstDirection))
                 return;
 
-            // Use the confirmation bar CLOSE as the planned entry price, as in
-            // the provided video. Actual Strategy Analyzer market fill differs.
-            double plannedEntry = Close[0];
+            double candidateEntry = Close[0];
             double stop = Instrument.MasterInstrument.RoundToTickSize(
                 direction == 1 ? Low[0] : High[0]);
-            double risk = direction == 1 ? plannedEntry - stop : stop - plannedEntry;
-            if (risk < TickSize || (MaxStopPoints > 0 && risk > MaxStopPoints))
+            double risk = direction == 1
+                ? candidateEntry - stop : stop - candidateEntry;
+
+            if (risk < TickSize ||
+                (MaxStopPoints > 0 && risk > MaxStopPoints))
                 return;
 
             double target = Instrument.MasterInstrument.RoundToTickSize(
-                plannedEntry + direction * 0.5 * risk);
-            if (direction == 1 ? target <= plannedEntry : target >= plannedEntry)
+                candidateEntry + direction * 0.5 * risk);
+            if (direction == 1 ? target <= candidateEntry : target >= candidateEntry)
                 return;
 
             string entryName = direction == 1 ? "Long1" : "Short1";
-            // NinjaTrader managed stop/target orders are OCO-linked.
-            // Target is anchored to planned close, NOT the next-bar fill.
             SetStopLoss(entryName, CalculationMode.Price, stop, false);
             SetProfitTarget(entryName, CalculationMode.Price, target);
+
+            // Record the planned bracket before submitting the actual orders.
+            // Strategy Analyzer may execute on the next bar with a different
+            // fill price, which is represented by blue entry execution dots.
+            activeTradeTag = sessionDate.ToString("yyyyMMdd") + "_" + (entriesToday + 1);
+            activeSignalBar = CurrentBar;
+            activeDirection = direction;
+            plannedEntry = candidateEntry;
+            plannedStop = stop;
+            plannedTarget = target;
+            actualEntryFill = double.NaN;
+            DrawSignal(direction);
 
             if (direction == 1)
                 EnterLong(Contracts, entryName);
@@ -194,5 +354,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Range(0, 100000)]
         [Display(Name = "Max stop points (0 disables)", GroupName = "Parameters", Order = 4)]
         public double MaxStopPoints { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Show chart visuals", GroupName = "Parameters", Order = 5)]
+        public bool ShowVisuals { get; set; }
     }
 }
