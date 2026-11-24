@@ -20,3 +20,18 @@ Fresh research repository for independently implemented **NQ/MNQ** automated str
 **Do not enable this research strategy on a funded or evaluation account yet.** Historical order-fills, session VWAP anchoring, real-time handling, broker rejection/reconnect behavior, slippage, risk limits and shutdown compliance require validation.
 
 The video's reported results are unverified and are **not** performance claims for F1.
+
+
+## Fixed-dollar risk sizing
+
+`NQSessionBreakoutStrategy` calculates quantity from its 5-minute signal
+candle's stop distance and the instrument's point value. Default
+`FixedRiskDollars = 100`, `MaxContracts = 20`,
+`CostReservePerContract = 0`. It rounds down to the nearest whole contract,
+skips trades too large for the risk budget, and preserves the original
+strategy/indicator separation. Details: `docs/BACKTEST.md`.
+
+**Important:** This caps only *planned* stop risk, not actual market-executed
+losses. It has not been compiled or live-tested in NinjaTrader. Do not deploy
+to a prop evaluation until execution, daily loss and firm rule compliance
+controls are validated.

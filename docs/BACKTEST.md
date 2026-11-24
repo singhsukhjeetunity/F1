@@ -17,3 +17,44 @@ Official NinjaTrader references:
 - https://ninjatrader.com/support/helpguides/nt8/setstoploss.htm
 - https://ninjatrader.com/support/helpguides/nt8/setprofittarget.htm
 - https://static.ninjatrader.com/support/helpGuides/nt8/understanding_historical_fill_.htm
+
+
+## Fixed-dollar risk position sizing (2026-11-24 update)
+
+The strategy now sizes each signal dynamically rather than using a fixed
+`Contracts` input. `FixedRiskDollars` defaults to **$100 planned stop risk per
+trade**, `MaxContracts` defaults to **20**, and `CostReservePerContract`
+defaults to **$0** (set this to your estimated round-trip friction allowance
+in addition to selecting commissions/slippage in Strategy Analyzer).
+
+For a long signal, stop distance = signal close - signal candle low.
+For a short signal, stop distance = signal candle high - signal close.
+Dollar risk per contract = distance in points ×
+`Instrument.MasterInstrument.PointValue` + `CostReservePerContract`.
+The strategy enters `floor(FixedRiskDollars / riskPerContract)`, capped by
+`MaxContracts`. It **skips** an unaffordable trade (zero contracts), and
+never rounds upward to force a fill. Whole futures contracts mean actual planned
+risk is often LESS than the dollar budget.
+
+Example: MNQ ($2/point), signal stop 25 points, fixed budget $150,
+cost reserve $0 → planned stop risk $50 per contract → **3 MNQ**.
+For a 90-point stop on MNQ at $100 risk, it skips (1 contract would risk $180).
+
+**Risk caveat:** This does NOT guarantee a $100 realized loss. The original
+strategy sends a market entry at next-bar fill, while stop/target are priced
+from the prior signal close. Gaps, stop slippage, fees, commissions and fills
+can exceed the budget. For the intended 25K LucidFlex use case,
+`MaxContracts` must never exceed the current permitted contract limit, and
+additional account-level loss guards are required before live use.
+
+The opening range, VWAP filter, 0.5R target, opposite-direction second trade,
+session parameters and absence of chart drawing were preserved.
+
+## Export trades for Edge Engine
+
+After a complete MNQ backtest, select **Trades** in the Strategy Analyzer
+**Display** dropdown. Right-click inside the trades grid → **Export** → **CSV**.
+Save the full-history trade list and retain fields including entry/exit
+timestamps, quantity and realized P&L. Export the nonoverlapping full-period
+test, not multiple overlapping screenshots. Confirm the CSV's dates cover
+the requested period.

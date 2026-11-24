@@ -8,6 +8,8 @@
 // - Uses cumulative typical-price * 5-minute-volume VWAP approximation (not tick VWAP).
 // - Signals at confirmed bar close; market entries fill on the NEXT bar/tick in a backtest.
 // - Stops and targets reference the SIGNAL BAR CLOSE, not necessarily the eventual fill.
+// - Trade quantity is determined from a fixed planned-stop risk budget.
+// - This is a cap on PLANNED stop risk, not a guarantee of realized fills.
 // - Test with realistic data, commissions, slippage and intrabar fill resolution.
 // - NOT validated for unattended live execution or any prop-firm compliance.
 
@@ -45,7 +47,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ExitOnSessionCloseSeconds = 60;
                 IsInstantiatedOnEachOptimizationIteration = true;
                 BarsRequiredToTrade = 1;
-                Contracts = 1;
+                FixedRiskDollars = 100.0;
+                MaxContracts = 20;
+                CostReservePerContract = 0.0;
                 LastEntryTime = 153000;
                 FlattenTime = 155500;
                 MaxStopPoints = 0;
@@ -159,6 +163,28 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (direction == 1 ? target <= plannedEntry : target >= plannedEntry)
                 return;
 
+            // Size from the stop's distance in points multiplied by the cash
+            // value of one futures point for this instrument (MNQ: $2, NQ: $20).
+            // Use only the strategy's PLANNED signal-close entry price.
+            // Any next-bar gap, slippage, commission or stop-market overfill
+            // can make ACTUAL losses exceed FixedRiskDollars.
+            double pointValue = Instrument.MasterInstrument.PointValue;
+            if (pointValue <= 0 || double.IsNaN(pointValue))
+                return;
+
+            double plannedLossPerContract = risk * pointValue + CostReservePerContract;
+            if (plannedLossPerContract <= 0 ||
+                double.IsNaN(plannedLossPerContract) ||
+                double.IsInfinity(plannedLossPerContract))
+                return;
+
+            int quantity = (int)Math.Floor(
+                Math.Min((double)MaxContracts, FixedRiskDollars / plannedLossPerContract));
+
+            // Skip rather than forcing one contract and exceeding the cap.
+            if (quantity < 1)
+                return;
+
             string entryName = direction == 1 ? "Long1" : "Short1";
             // NinjaTrader managed stop/target orders are OCO-linked.
             // Target is anchored to planned close, NOT the next-bar fill.
@@ -166,9 +192,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             SetProfitTarget(entryName, CalculationMode.Price, target);
 
             if (direction == 1)
-                EnterLong(Contracts, entryName);
+                EnterLong(quantity, entryName);
             else
-                EnterShort(Contracts, entryName);
+                EnterShort(quantity, entryName);
 
             entriesToday++;
             if (entriesToday == 1)
@@ -176,23 +202,33 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
 
         [NinjaScriptProperty]
+        [Range(1.0, 1000000.0)]
+        [Display(Name = "Fixed risk dollars per trade", GroupName = "Parameters", Order = 1)]
+        public double FixedRiskDollars { get; set; }
+
+        [NinjaScriptProperty]
         [Range(1, 100)]
-        [Display(Name = "Contracts", GroupName = "Parameters", Order = 1)]
-        public int Contracts { get; set; }
+        [Display(Name = "Maximum contracts", GroupName = "Parameters", Order = 2)]
+        public int MaxContracts { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.0, 1000.0)]
+        [Display(Name = "Cost reserve per contract ($)", GroupName = "Parameters", Order = 3)]
+        public double CostReservePerContract { get; set; }
 
         [NinjaScriptProperty]
         [Range(93500, 155500)]
-        [Display(Name = "Last entry time (ET HHmmss)", GroupName = "Parameters", Order = 2)]
+        [Display(Name = "Last entry time (ET HHmmss)", GroupName = "Parameters", Order = 4)]
         public int LastEntryTime { get; set; }
 
         [NinjaScriptProperty]
         [Range(93500, 160000)]
-        [Display(Name = "Flatten time (ET HHmmss)", GroupName = "Parameters", Order = 3)]
+        [Display(Name = "Flatten time (ET HHmmss)", GroupName = "Parameters", Order = 5)]
         public int FlattenTime { get; set; }
 
         [NinjaScriptProperty]
         [Range(0, 100000)]
-        [Display(Name = "Max stop points (0 disables)", GroupName = "Parameters", Order = 4)]
+        [Display(Name = "Max stop points (0 disables)", GroupName = "Parameters", Order = 6)]
         public double MaxStopPoints { get; set; }
     }
 }
