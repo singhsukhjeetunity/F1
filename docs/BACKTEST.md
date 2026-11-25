@@ -62,8 +62,8 @@ the requested period.
 
 ## Live safeguards (2026-11-24)
 
-NinjaTrader's native strategy Enabled control governs orders; there is
-no extra live-order toggle or minimum-account-equity input. The optional
-StrategySessionLossLimit defaults to 0 (disabled); a positive dollar value
-enables a strategy-only session PnL check. It is not the firm's full daily-loss
-rule. Set the limit deliberately before deployment and see docs/SAFETY.md.
+NinjaTrader's native strategy Enabled control governs orders. There are
+no separate live-order toggle, minimum account-equity or strategy-session
+loss-limit inputs. Original trade-level planned risk sizing and stop/target
+orders remain. The prop firm's daily loss restrictions are **not** enforced
+by this strategy; see docs/SAFETY.md before deployment.

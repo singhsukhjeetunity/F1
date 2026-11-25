@@ -39,11 +39,11 @@ controls are validated.
 
 ## Safety-hardening update (2026-11-24)
 
-The extra live-entry toggle and account-equity floor have been removed.
-NinjaTrader's native strategy Enabled control now governs execution.
-StrategySessionLossLimit remains available: 0 disables it; any positive
-dollar setting enables the strategy-only loss guard. Existing order,
-disconnection and duplicate-entry safeguards remain. See docs/SAFETY.md.
+The extra live-entry toggle, account-equity floor, and strategy-session
+loss-limit guard have all been removed. NinjaTrader's native strategy
+Enabled control governs execution. Trade-level planned risk sizing,
+stop/target orders, connection/rejection diagnostics, duplicate-entry
+and restart safeguards remain. See docs/SAFETY.md.
 
 **Not a deployment-ready or firm-rule-certified strategy.** NinjaTrader
 compilation and Sim101 runtime validation are required.

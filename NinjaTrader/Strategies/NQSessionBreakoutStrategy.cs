@@ -39,9 +39,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool liveInstrumentAllowed;
         private bool liveFault;
         private bool suppressCurrentSession;
-        private bool sessionLossBlocked;
-        private bool baselineReady;
-        private double sessionStartPnl;
         private double plannedEntryPrice;
         private double plannedStopPrice;
         private int plannedDirection, plannedQuantity;
@@ -75,8 +72,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 NumberRestartAttempts = 0;
 
                 // Native NinjaTrader Enabled governs execution.
-                // Zero disables the configurable strategy-session loss limit.
-                StrategySessionLossLimit = 0.0;
                 MaxAdverseEntrySlippageTicks = 4;
                 MNQOnlyWhenLive = true;
             }
@@ -93,7 +88,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     + liveInstrumentAllowed
                     + " account=" + (Account == null ? "unknown" : Account.Name)
                     + " symbol=" + Instrument.FullName
-                    + " sessionLossLimit=" + StrategySessionLossLimit
                     + " midSessionBlocked=" + suppressCurrentSession);
             }
         }
@@ -112,47 +106,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Only close the position managed by this strategy.
             if (State == State.Realtime)
                 CloseStrategy("F1EmergencyClose");
-        }
-
-        private double StrategyPnL()
-        {
-            return SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit;
-        }
-
-        private bool SessionLossReached(double price)
-        {
-            if (!baselineReady || StrategySessionLossLimit <= 0.0)
-                return false;
-
-            double realized = StrategyPnL() - sessionStartPnl;
-            double unrealized = Position.MarketPosition == MarketPosition.Flat
-                ? 0.0
-                : Position.GetUnrealizedProfitLoss(PerformanceUnit.Currency, price);
-
-            if (double.IsNaN(realized) || double.IsNaN(unrealized))
-            {
-                if (State == State.Realtime)
-                    EmergencyStop("Invalid strategy PnL");
-                return true;
-            }
-            if (realized + unrealized > -StrategySessionLossLimit)
-                return false;
-
-            sessionLossBlocked = true;
-            if (State == State.Realtime)
-                EmergencyStop("Strategy loss threshold breached");
-            else if (Position.MarketPosition == MarketPosition.Long)
-                ExitLong("ResearchLossGuard", "Long1");
-            else if (Position.MarketPosition == MarketPosition.Short)
-                ExitShort("ResearchLossGuard", "Short1");
-            return true;
-        }
-
-        protected override void OnMarketData(MarketDataEventArgs update)
-        {
-            if (State == State.Realtime && liveInstrumentAllowed && !liveFault &&
-                update.MarketDataType == MarketDataType.Last)
-                SessionLossReached(update.Price);
         }
 
         protected override void OnConnectionStatusUpdate(
@@ -207,8 +160,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             firstDirection = 0;
             lastExitBar = -1;
             entryPending = false;
-            sessionLossBlocked = false;
-            baselineReady = false;
             // liveFault deliberately persists until manual intervention.
         }
 
@@ -280,8 +231,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 openingBar = CurrentBar;
                 openingHigh = High[0];
                 openingLow = Low[0];
-                sessionStartPnl = StrategyPnL();
-                baselineReady = true;
                 suppressCurrentSession = false;
                 if (State == State.Realtime)
                     Log("NY SESSION reset; instrumentAllowed=" + liveInstrumentAllowed);
@@ -309,9 +258,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     ExitShort("ResearchTimeExit", "Short1");
                 return;
             }
-
-            if (SessionLossReached(Close[0]) || sessionLossBlocked)
-                return;
 
             // Historical entry logic remains untouched. Native Enabled controls
             // live execution; faults and conflicting account positions block entries.
@@ -425,17 +371,12 @@ namespace NinjaTrader.NinjaScript.Strategies
         public double MaxStopPoints { get; set; }
 
         [NinjaScriptProperty]
-        [Range(0.0, 100000.0)]
-        [Display(Name = "Strategy session loss limit ($)", GroupName = "Live safeguards", Order = 7)]
-        public double StrategySessionLossLimit { get; set; }
-
-        [NinjaScriptProperty]
         [Range(1, 1000)]
-        [Display(Name = "Max adverse entry slippage (ticks)", GroupName = "Live safeguards", Order = 8)]
+        [Display(Name = "Max adverse entry slippage (ticks)", GroupName = "Live safeguards", Order = 7)]
         public int MaxAdverseEntrySlippageTicks { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "MNQ only when live", GroupName = "Live safeguards", Order = 9)]
+        [Display(Name = "MNQ only when live", GroupName = "Live safeguards", Order = 8)]
         public bool MNQOnlyWhenLive { get; set; }
     }
 }
