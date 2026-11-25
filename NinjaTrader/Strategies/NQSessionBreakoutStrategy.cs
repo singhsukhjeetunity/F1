@@ -36,7 +36,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         // Live-safety state: historical entry/exit rules remain unchanged.
         private bool entryPending;
-        private bool liveArmed;
+        private bool liveInstrumentAllowed;
         private bool liveFault;
         private bool suppressCurrentSession;
         private bool sessionLossBlocked;
@@ -74,26 +74,26 @@ namespace NinjaTrader.NinjaScript.Strategies
                 DisconnectDelaySeconds = 10;
                 NumberRestartAttempts = 0;
 
-                // Backtests are permitted; real execution is intentionally unarmed.
-                EnableLiveOrders = false;
+                // Native NinjaTrader Enabled governs execution.
+                // Zero disables the configurable strategy-session loss limit.
                 StrategySessionLossLimit = 0.0;
-                MinimumAccountNetLiquidation = 0.0;
                 MaxAdverseEntrySlippageTicks = 4;
                 MNQOnlyWhenLive = true;
             }
             else if (State == State.Realtime)
             {
-                liveArmed = EnableLiveOrders && StrategySessionLossLimit > 0.0
-                    && MinimumAccountNetLiquidation > 0.0
-                    && (!MNQOnlyWhenLive || Instrument.MasterInstrument.Name == "MNQ");
+                liveInstrumentAllowed = !MNQOnlyWhenLive
+                    || Instrument.MasterInstrument.Name == "MNQ";
 
                 if (CurrentBar >= 0 && ToTime(Time[0]) >= 93500
                     && ToTime(Time[0]) < 160000)
                     suppressCurrentSession = true; // No mid-session startup reentry.
 
-                Print("[F1][START] " + (liveArmed ? "ARMED" : "UNARMED")
+                Print("[F1][START] NinjaTrader Enabled; instrumentAllowed="
+                    + liveInstrumentAllowed
                     + " account=" + (Account == null ? "unknown" : Account.Name)
                     + " symbol=" + Instrument.FullName
+                    + " sessionLossLimit=" + StrategySessionLossLimit
                     + " midSessionBlocked=" + suppressCurrentSession);
             }
         }
@@ -150,19 +150,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         protected override void OnMarketData(MarketDataEventArgs update)
         {
-            if (State == State.Realtime && liveArmed && !liveFault &&
+            if (State == State.Realtime && liveInstrumentAllowed && !liveFault &&
                 update.MarketDataType == MarketDataType.Last)
                 SessionLossReached(update.Price);
-        }
-
-        protected override void OnAccountItemUpdate(Account account,
-            AccountItem item, double value)
-        {
-            if (State != State.Realtime || !liveArmed || liveFault ||
-                item != AccountItem.NetLiquidation)
-                return;
-            if (double.IsNaN(value) || value <= MinimumAccountNetLiquidation)
-                EmergencyStop("Account NetLiquidation invalid or below floor");
         }
 
         protected override void OnConnectionStatusUpdate(
@@ -199,19 +189,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private bool RealtimeAccountSafe()
         {
-            if (!liveArmed || liveFault || suppressCurrentSession ||
-                Account == null || PositionAccount.MarketPosition != MarketPosition.Flat)
-                return false;
-
-            double netLiq = Account.Get(AccountItem.NetLiquidation, Currency.UsDollar);
-            if (double.IsNaN(netLiq) || netLiq <= 0)
-                return false; // Unsupported account metric: do not open orders.
-            if (netLiq <= MinimumAccountNetLiquidation)
-            {
-                EmergencyStop("Account floor breached before new entry");
-                return false;
-            }
-            return true;
+            // Safeguard against collisions with manual/other strategy positions.
+            return liveInstrumentAllowed && !liveFault && !suppressCurrentSession
+                && Account != null && PositionAccount != null
+                && PositionAccount.MarketPosition == MarketPosition.Flat;
         }
 
         private void ResetSession(DateTime date)
@@ -256,7 +237,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     Log("ENTRY FILL: " + action + " qty=" + quantity
                         + " price=" + price.ToString("F2"));
-                    if (liveArmed && !liveFault)
+                    if (liveInstrumentAllowed && !liveFault)
                     {
                         double adverse = plannedDirection == 1
                             ? (price - plannedEntryPrice) / TickSize
@@ -303,7 +284,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 baselineReady = true;
                 suppressCurrentSession = false;
                 if (State == State.Realtime)
-                    Log("NY SESSION reset; armed=" + liveArmed);
+                    Log("NY SESSION reset; instrumentAllowed=" + liveInstrumentAllowed);
             }
 
             if (openingBar < 0 || clock < 93500)
@@ -332,8 +313,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (SessionLossReached(Close[0]) || sessionLossBlocked)
                 return;
 
-            // The research-only historical path is untouched. All live entries
-            // require explicit arming and trustworthy account risk inputs.
+            // Historical entry logic remains untouched. Native Enabled controls
+            // live execution; faults and conflicting account positions block entries.
             if (State == State.Realtime && !RealtimeAccountSafe())
                 return;
 
@@ -444,26 +425,17 @@ namespace NinjaTrader.NinjaScript.Strategies
         public double MaxStopPoints { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Enable live orders", GroupName = "Live safeguards", Order = 7)]
-        public bool EnableLiveOrders { get; set; }
-
-        [NinjaScriptProperty]
         [Range(0.0, 100000.0)]
-        [Display(Name = "Strategy session loss limit ($)", GroupName = "Live safeguards", Order = 8)]
+        [Display(Name = "Strategy session loss limit ($)", GroupName = "Live safeguards", Order = 7)]
         public double StrategySessionLossLimit { get; set; }
 
         [NinjaScriptProperty]
-        [Range(0.0, 10000000.0)]
-        [Display(Name = "Minimum account net liquidation ($)", GroupName = "Live safeguards", Order = 9)]
-        public double MinimumAccountNetLiquidation { get; set; }
-
-        [NinjaScriptProperty]
         [Range(1, 1000)]
-        [Display(Name = "Max adverse entry slippage (ticks)", GroupName = "Live safeguards", Order = 10)]
+        [Display(Name = "Max adverse entry slippage (ticks)", GroupName = "Live safeguards", Order = 8)]
         public int MaxAdverseEntrySlippageTicks { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "MNQ only when live", GroupName = "Live safeguards", Order = 11)]
+        [Display(Name = "MNQ only when live", GroupName = "Live safeguards", Order = 9)]
         public bool MNQOnlyWhenLive { get; set; }
     }
 }

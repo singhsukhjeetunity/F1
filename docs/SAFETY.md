@@ -7,9 +7,12 @@ and unchanged; no strategy drawings were added.
 
 ## Added protections
 
-- Live entries OFF by default, including on Sim101 until manually armed.
-- Arming requires a positive strategy session loss limit and account net
-  liquidation floor. Default instrument restriction MNQ.
+- Trading is controlled by NinjaTrader's native strategy Enabled checkbox,
+  without a separate internal live-order switch.
+- StrategySessionLossLimit remains configurable: 0 disables it; a positive
+  value requests a stop on a strategy-only loss breach. This is not a guaranteed
+  broker account daily-loss-limit stop.
+- MNQ-only live instrument restriction remains enabled by default.
 - NinjaTrader built-in StopCancelClose (order rejections), StopStrategy
   (connection loss), zero automatic restart attempts and WaitUntilFlat.
 - Logs account, startup state, New York session reset, fills, rejected and
@@ -20,8 +23,6 @@ and unchanged; no strategy drawings were added.
   real-time startup; manual account reconciliation remains mandatory.
 - Checks strategy-only session PnL at bar close and, when realtime, on last
   market-data updates. A breach requests CloseStrategy for **this strategy**.
-- Checks account NetLiquidation against a configurable static absolute floor;
-  a breach requests CloseStrategy.
 - Checks entry fills for large adverse slippage or filled-price planned-stop
   risk above budget, and requests an emergency close when exceeded.
 
@@ -29,9 +30,8 @@ and unchanged; no strategy drawings were added.
 
 1. None of this has been **compiled or runtime-tested in NinjaTrader**.
    Working C# text alone does not prove it is safe.
-2. **No complete Lucid trailing drawdown implementation:** an absolute net
-   liquidation floor is not a dynamically updated firm trailing-loss threshold.
-   Provider account fields may be missing, stale or nonrepresentative.
+2. **No complete Lucid trailing drawdown implementation:** the strategy-only
+   session loss limit does not track the firm's dynamic account-wide threshold.
 3. The internal loss guard is only for this *strategy*, not other positions,
    copied accounts or the prop firm's consolidated risk rules.
 4. A lost broker connection can prevent emergency orders from reaching the
@@ -45,17 +45,17 @@ and unchanged; no strategy drawings were added.
    **not guaranteed** by this mechanism.
 8. The source has not been tested against actual Lucid account limits,
    sessions, rules, payout requirements, or third-party trade copying.
-9. All new safeguards are dormant for historical backtests by default (loss
-   limit = 0). Historical comparison still requires comparing trade lists.
+9. Strategy-session loss protection defaults to disabled (0); selecting a
+   positive value also changes historical simulations. Recheck trade lists.
 
 ## Remaining runtime validation (not claimed complete)
 
 - F5 compile on NinjaTrader 8, with only one class copy under Custom.
 - Baseline parity on MNQ 5m with original historical settings and data.
-- Sim101: arming off/on, entry rejection, stop rejection, partial fills,
-  slippage, session loss threshold, account floor threshold.
-- Sim101: disconnections, 09:40 restart, day rollover, orphaned positions,
-  missing account NetLiquidation values and end-of-session behavior.
+- Sim101: native Enabled/Disabled, entry rejection, stop rejection, partial
+  fills, slippage and strategy session loss threshold.
+- Sim101: disconnections, 09:40 restart, day rollover, orphaned positions
+  and end-of-session behavior.
 - Verify session timezone, holidays and shortened trading hours.
 - Final forward-test on a simulation account before buying any evaluation.
 - No live deployment or copying until all runtime checks pass.

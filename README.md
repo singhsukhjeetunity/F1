@@ -39,10 +39,11 @@ controls are validated.
 
 ## Safety-hardening update (2026-11-24)
 
-The strategy is now unarmed for live entries by default and includes
-order/disconnection logs, risk checks, duplicate-entry safeguards and
-no mid-session restart reentry. Backtests with original default risk
-settings still use the original signal rules. See docs/SAFETY.md.
+The extra live-entry toggle and account-equity floor have been removed.
+NinjaTrader's native strategy Enabled control now governs execution.
+StrategySessionLossLimit remains available: 0 disables it; any positive
+dollar setting enables the strategy-only loss guard. Existing order,
+disconnection and duplicate-entry safeguards remain. See docs/SAFETY.md.
 
 **Not a deployment-ready or firm-rule-certified strategy.** NinjaTrader
 compilation and Sim101 runtime validation are required.

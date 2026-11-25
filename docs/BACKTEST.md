@@ -62,7 +62,8 @@ the requested period.
 
 ## Live safeguards (2026-11-24)
 
-For historical research, leave EnableLiveOrders false, StrategySessionLossLimit
-zero and MinimumAccountNetLiquidation zero. This avoids mixing the
-live-only risk gate with Edge Engine research assumptions. For simulated
-execution and eventual live-account configuration, read docs/SAFETY.md.
+NinjaTrader's native strategy Enabled control governs orders; there is
+no extra live-order toggle or minimum-account-equity input. The optional
+StrategySessionLossLimit defaults to 0 (disabled); a positive dollar value
+enables a strategy-only session PnL check. It is not the firm's full daily-loss
+rule. Set the limit deliberately before deployment and see docs/SAFETY.md.
