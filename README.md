@@ -35,3 +35,14 @@ strategy/indicator separation. Details: `docs/BACKTEST.md`.
 losses. It has not been compiled or live-tested in NinjaTrader. Do not deploy
 to a prop evaluation until execution, daily loss and firm rule compliance
 controls are validated.
+
+
+## Safety-hardening update (2026-11-24)
+
+The strategy is now unarmed for live entries by default and includes
+order/disconnection logs, risk checks, duplicate-entry safeguards and
+no mid-session restart reentry. Backtests with original default risk
+settings still use the original signal rules. See docs/SAFETY.md.
+
+**Not a deployment-ready or firm-rule-certified strategy.** NinjaTrader
+compilation and Sim101 runtime validation are required.

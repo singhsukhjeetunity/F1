@@ -34,6 +34,19 @@ namespace NinjaTrader.NinjaScript.Strategies
         private int firstDirection; // 1 = long, -1 = short
         private int lastExitBar = -1;
 
+        // Live-safety state: historical entry/exit rules remain unchanged.
+        private bool entryPending;
+        private bool liveArmed;
+        private bool liveFault;
+        private bool suppressCurrentSession;
+        private bool sessionLossBlocked;
+        private bool baselineReady;
+        private double sessionStartPnl;
+        private double plannedEntryPrice;
+        private double plannedStopPrice;
+        private int plannedDirection, plannedQuantity;
+
+
         protected override void OnStateChange()
         {
             if (State == State.SetDefaults)
@@ -53,7 +66,152 @@ namespace NinjaTrader.NinjaScript.Strategies
                 LastEntryTime = 153000;
                 FlattenTime = 155500;
                 MaxStopPoints = 0;
+
+                // Platform-managed error and disconnection behavior.
+                StartBehavior = StartBehavior.WaitUntilFlat;
+                RealtimeErrorHandling = RealtimeErrorHandling.StopCancelClose;
+                ConnectionLossHandling = ConnectionLossHandling.StopStrategy;
+                DisconnectDelaySeconds = 10;
+                NumberRestartAttempts = 0;
+
+                // Backtests are permitted; real execution is intentionally unarmed.
+                EnableLiveOrders = false;
+                StrategySessionLossLimit = 0.0;
+                MinimumAccountNetLiquidation = 0.0;
+                MaxAdverseEntrySlippageTicks = 4;
+                MNQOnlyWhenLive = true;
             }
+            else if (State == State.Realtime)
+            {
+                liveArmed = EnableLiveOrders && StrategySessionLossLimit > 0.0
+                    && MinimumAccountNetLiquidation > 0.0
+                    && (!MNQOnlyWhenLive || Instrument.MasterInstrument.Name == "MNQ");
+
+                if (CurrentBar >= 0 && ToTime(Time[0]) >= 93500
+                    && ToTime(Time[0]) < 160000)
+                    suppressCurrentSession = true; // No mid-session startup reentry.
+
+                Print("[F1][START] " + (liveArmed ? "ARMED" : "UNARMED")
+                    + " account=" + (Account == null ? "unknown" : Account.Name)
+                    + " symbol=" + Instrument.FullName
+                    + " midSessionBlocked=" + suppressCurrentSession);
+            }
+        }
+
+        private void Log(string message)
+        {
+            if (State == State.Realtime)
+                Print("[F1] " + DateTime.Now.ToString("o") + " " + message);
+        }
+
+        private void EmergencyStop(string reason)
+        {
+            if (liveFault) return;
+            liveFault = true;
+            Log("EMERGENCY STOP: " + reason);
+            // Only close the position managed by this strategy.
+            if (State == State.Realtime)
+                CloseStrategy("F1EmergencyClose");
+        }
+
+        private double StrategyPnL()
+        {
+            return SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit;
+        }
+
+        private bool SessionLossReached(double price)
+        {
+            if (!baselineReady || StrategySessionLossLimit <= 0.0)
+                return false;
+
+            double realized = StrategyPnL() - sessionStartPnl;
+            double unrealized = Position.MarketPosition == MarketPosition.Flat
+                ? 0.0
+                : Position.GetUnrealizedProfitLoss(PerformanceUnit.Currency, price);
+
+            if (double.IsNaN(realized) || double.IsNaN(unrealized))
+            {
+                if (State == State.Realtime)
+                    EmergencyStop("Invalid strategy PnL");
+                return true;
+            }
+            if (realized + unrealized > -StrategySessionLossLimit)
+                return false;
+
+            sessionLossBlocked = true;
+            if (State == State.Realtime)
+                EmergencyStop("Strategy loss threshold breached");
+            else if (Position.MarketPosition == MarketPosition.Long)
+                ExitLong("ResearchLossGuard", "Long1");
+            else if (Position.MarketPosition == MarketPosition.Short)
+                ExitShort("ResearchLossGuard", "Short1");
+            return true;
+        }
+
+        protected override void OnMarketData(MarketDataEventArgs update)
+        {
+            if (State == State.Realtime && liveArmed && !liveFault &&
+                update.MarketDataType == MarketDataType.Last)
+                SessionLossReached(update.Price);
+        }
+
+        protected override void OnAccountItemUpdate(Account account,
+            AccountItem item, double value)
+        {
+            if (State != State.Realtime || !liveArmed || liveFault ||
+                item != AccountItem.NetLiquidation)
+                return;
+            if (double.IsNaN(value) || value <= MinimumAccountNetLiquidation)
+                EmergencyStop("Account NetLiquidation invalid or below floor");
+        }
+
+        protected override void OnConnectionStatusUpdate(
+            ConnectionStatusEventArgs update)
+        {
+            if (State == State.Realtime &&
+                (update.Status != ConnectionStatus.Connected ||
+                 update.PriceStatus != ConnectionStatus.Connected))
+            {
+                liveFault = true;
+                Log("CONNECTION CHANGED: no automatic restart; inspect orders and account");
+            }
+        }
+
+        protected override void OnOrderUpdate(Order order, double limitPrice,
+            double stopPrice, int quantity, int filled, double averageFillPrice,
+            OrderState orderState, DateTime time, ErrorCode error, string comment)
+        {
+            if (State != State.Realtime || order == null) return;
+            if (orderState == OrderState.Rejected || error != ErrorCode.NoError)
+            {
+                liveFault = true;
+                Log("ORDER ERROR " + order.Name + " " + orderState +
+                    " " + error + " " + comment +
+                    "; platform StopCancelClose remains enabled");
+            }
+            if ((order.Name == "Long1" || order.Name == "Short1")
+                && orderState == OrderState.Cancelled)
+            {
+                liveFault = true;
+                Log("ENTRY CANCELLED: manual order/position reconciliation required");
+            }
+        }
+
+        private bool RealtimeAccountSafe()
+        {
+            if (!liveArmed || liveFault || suppressCurrentSession ||
+                Account == null || PositionAccount.MarketPosition != MarketPosition.Flat)
+                return false;
+
+            double netLiq = Account.Get(AccountItem.NetLiquidation, Currency.UsDollar);
+            if (double.IsNaN(netLiq) || netLiq <= 0)
+                return false; // Unsupported account metric: do not open orders.
+            if (netLiq <= MinimumAccountNetLiquidation)
+            {
+                EmergencyStop("Account floor breached before new entry");
+                return false;
+            }
+            return true;
         }
 
         private void ResetSession(DateTime date)
@@ -67,6 +225,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             entriesToday = 0;
             firstDirection = 0;
             lastExitBar = -1;
+            entryPending = false;
+            sessionLossBlocked = false;
+            baselineReady = false;
+            // liveFault deliberately persists until manual intervention.
         }
 
         protected override void OnExecutionUpdate(
@@ -85,9 +247,38 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Only a completed exit permits an opposite-side second entry.
             // The new confirmation must also be from a later finished 5-minute bar.
             OrderAction action = execution.Order.OrderAction;
-            if ((action == OrderAction.Sell || action == OrderAction.BuyToCover) &&
+            if (action == OrderAction.Buy || action == OrderAction.SellShort)
+            {
+                if (execution.Order.OrderState == OrderState.Filled)
+                    entryPending = false;
+
+                if (State == State.Realtime)
+                {
+                    Log("ENTRY FILL: " + action + " qty=" + quantity
+                        + " price=" + price.ToString("F2"));
+                    if (liveArmed && !liveFault)
+                    {
+                        double adverse = plannedDirection == 1
+                            ? (price - plannedEntryPrice) / TickSize
+                            : (plannedEntryPrice - price) / TickSize;
+                        double riskAtFill = Math.Abs(price - plannedStopPrice) *
+                            Instrument.MasterInstrument.PointValue * plannedQuantity +
+                            CostReservePerContract * plannedQuantity;
+                        if (adverse > MaxAdverseEntrySlippageTicks ||
+                            riskAtFill > FixedRiskDollars + 0.01)
+                            EmergencyStop("Adverse fill/risk over budget: ticks="
+                                + adverse.ToString("F1") + " risk="
+                                + riskAtFill.ToString("F2"));
+                    }
+                }
+            }
+            else if ((action == OrderAction.Sell || action == OrderAction.BuyToCover) &&
                 marketPosition == MarketPosition.Flat)
+            {
                 lastExitBar = CurrentBar;
+                Log("EXIT FILL: " + action + " qty=" + quantity
+                    + " price=" + price.ToString("F2"));
+            }
         }
 
         protected override void OnBarUpdate()
@@ -108,6 +299,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 openingBar = CurrentBar;
                 openingHigh = High[0];
                 openingLow = Low[0];
+                sessionStartPnl = StrategyPnL();
+                baselineReady = true;
+                suppressCurrentSession = false;
+                if (State == State.Realtime)
+                    Log("NY SESSION reset; armed=" + liveArmed);
             }
 
             if (openingBar < 0 || clock < 93500)
@@ -133,10 +329,19 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
+            if (SessionLossReached(Close[0]) || sessionLossBlocked)
+                return;
+
+            // The research-only historical path is untouched. All live entries
+            // require explicit arming and trustworthy account risk inputs.
+            if (State == State.Realtime && !RealtimeAccountSafe())
+                return;
+
             if (clock > LastEntryTime ||
                 CurrentBar <= openingBar ||
                 sumVolume <= 0 ||
                 entriesToday >= 2 ||
+                entryPending ||
                 Position.MarketPosition != MarketPosition.Flat ||
                 lastExitBar >= CurrentBar)
                 return;
@@ -191,14 +396,21 @@ namespace NinjaTrader.NinjaScript.Strategies
             SetStopLoss(entryName, CalculationMode.Price, stop, false);
             SetProfitTarget(entryName, CalculationMode.Price, target);
 
+            plannedDirection = direction;
+            plannedEntryPrice = plannedEntry;
+            plannedStopPrice = stop;
+            plannedQuantity = quantity;
+            entryPending = true;
+
+            // Reserve the daily entry slot before submission; no retry on
+            // cancellation or error and never a third session entry.
+            entriesToday++;
+            if (entriesToday == 1)
+                firstDirection = direction;
             if (direction == 1)
                 EnterLong(quantity, entryName);
             else
                 EnterShort(quantity, entryName);
-
-            entriesToday++;
-            if (entriesToday == 1)
-                firstDirection = direction;
         }
 
         [NinjaScriptProperty]
@@ -230,5 +442,28 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Range(0, 100000)]
         [Display(Name = "Max stop points (0 disables)", GroupName = "Parameters", Order = 6)]
         public double MaxStopPoints { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Enable live orders", GroupName = "Live safeguards", Order = 7)]
+        public bool EnableLiveOrders { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.0, 100000.0)]
+        [Display(Name = "Strategy session loss limit ($)", GroupName = "Live safeguards", Order = 8)]
+        public double StrategySessionLossLimit { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.0, 10000000.0)]
+        [Display(Name = "Minimum account net liquidation ($)", GroupName = "Live safeguards", Order = 9)]
+        public double MinimumAccountNetLiquidation { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 1000)]
+        [Display(Name = "Max adverse entry slippage (ticks)", GroupName = "Live safeguards", Order = 10)]
+        public int MaxAdverseEntrySlippageTicks { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "MNQ only when live", GroupName = "Live safeguards", Order = 11)]
+        public bool MNQOnlyWhenLive { get; set; }
     }
 }

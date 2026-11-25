@@ -58,3 +58,11 @@ Save the full-history trade list and retain fields including entry/exit
 timestamps, quantity and realized P&L. Export the nonoverlapping full-period
 test, not multiple overlapping screenshots. Confirm the CSV's dates cover
 the requested period.
+
+
+## Live safeguards (2026-11-24)
+
+For historical research, leave EnableLiveOrders false, StrategySessionLossLimit
+zero and MinimumAccountNetLiquidation zero. This avoids mixing the
+live-only risk gate with Edge Engine research assumptions. For simulated
+execution and eventual live-account configuration, read docs/SAFETY.md.
