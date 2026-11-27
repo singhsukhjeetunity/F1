@@ -38,6 +38,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool entryPending;
         private bool liveInstrumentAllowed;
         private bool liveFault;
+        // Transient connection availability is separate from latched order faults.
+        private bool liveConnectionReady = true;
+        private bool missingOpenBarLogged;
         private bool suppressCurrentSession;
         private double plannedEntryPrice;
         private double plannedStopPrice;
@@ -71,12 +74,17 @@ namespace NinjaTrader.NinjaScript.Strategies
                 DisconnectDelaySeconds = 10;
                 NumberRestartAttempts = 0;
 
+                // Route diagnostics to Output 1; key events also go to Control Center Log.
+                PrintTo = PrintTo.OutputTab1;
                 // Native NinjaTrader Enabled governs execution.
                 MaxAdverseEntrySlippageTicks = 4;
                 MNQOnlyWhenLive = true;
             }
             else if (State == State.Realtime)
             {
+                // Realtime can begin on an already-connected adapter; a later
+                // connection event will update this provisional ready state.
+                liveConnectionReady = true;
                 liveInstrumentAllowed = !MNQOnlyWhenLive
                     || Instrument.MasterInstrument.Name == "MNQ";
 
@@ -84,25 +92,33 @@ namespace NinjaTrader.NinjaScript.Strategies
                     && ToTime(Time[0]) < 160000)
                     suppressCurrentSession = true; // No mid-session startup reentry.
 
-                Print("[F1][START] NinjaTrader Enabled; instrumentAllowed="
-                    + liveInstrumentAllowed
-                    + " account=" + (Account == null ? "unknown" : Account.Name)
+                Diag("START account=" + (Account == null ? "unknown" : Account.Name)
                     + " symbol=" + Instrument.FullName
-                    + " midSessionBlocked=" + suppressCurrentSession);
+                    + " instrumentAllowed=" + liveInstrumentAllowed
+                    + " connectionReady=" + liveConnectionReady
+                    + " midSessionBlocked=" + suppressCurrentSession
+                    + " riskBudget=" + FixedRiskDollars
+                    + " maxContracts=" + MaxContracts, true);
             }
         }
 
-        private void Log(string message)
+        private void Diag(string message, bool toControlCenter = false)
         {
-            if (State == State.Realtime)
-                Print("[F1] " + DateTime.Now.ToString("o") + " " + message);
+            if (State != State.Realtime)
+                return;
+
+            string line = "[F1] " + DateTime.Now.ToString("HH:mm:ss")
+                + " " + message;
+            Print(line);
+            if (toControlCenter)
+                base.Log(line, LogLevel.Information);
         }
 
         private void EmergencyStop(string reason)
         {
             if (liveFault) return;
             liveFault = true;
-            Log("EMERGENCY STOP: " + reason);
+            Diag("EMERGENCY STOP: " + reason, true);
             // Only close the position managed by this strategy.
             if (State == State.Realtime)
                 CloseStrategy("F1EmergencyClose");
@@ -111,12 +127,21 @@ namespace NinjaTrader.NinjaScript.Strategies
         protected override void OnConnectionStatusUpdate(
             ConnectionStatusEventArgs update)
         {
-            if (State == State.Realtime &&
-                (update.Status != ConnectionStatus.Connected ||
-                 update.PriceStatus != ConnectionStatus.Connected))
+            if (State != State.Realtime || update == null)
+                return;
+
+            // Temporary adapter transitions block entries only while the
+            // connection is not ready. They must NOT latch liveFault.
+            // NinjaTrader's StopStrategy policy still handles a sustained loss.
+            bool ready = update.Status == ConnectionStatus.Connected
+                && update.PriceStatus == ConnectionStatus.Connected;
+            if (ready != liveConnectionReady)
             {
-                liveFault = true;
-                Log("CONNECTION CHANGED: no automatic restart; inspect orders and account");
+                liveConnectionReady = ready;
+                Diag("CONNECTION " + (ready ? "RECOVERED" : "NOT READY")
+                    + " orderFeed=" + update.Status
+                    + " priceFeed=" + update.PriceStatus
+                    + " (platform StopStrategy remains enabled)", true);
             }
         }
 
@@ -128,22 +153,23 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (orderState == OrderState.Rejected || error != ErrorCode.NoError)
             {
                 liveFault = true;
-                Log("ORDER ERROR " + order.Name + " " + orderState +
+                Diag("ORDER ERROR " + order.Name + " " + orderState +
                     " " + error + " " + comment +
-                    "; platform StopCancelClose remains enabled");
+                    "; platform StopCancelClose remains enabled", true);
             }
             if ((order.Name == "Long1" || order.Name == "Short1")
                 && orderState == OrderState.Cancelled)
             {
                 liveFault = true;
-                Log("ENTRY CANCELLED: manual order/position reconciliation required");
+                Diag("ENTRY CANCELLED: manual order/position reconciliation required", true);
             }
         }
 
         private bool RealtimeAccountSafe()
         {
             // Safeguard against collisions with manual/other strategy positions.
-            return liveInstrumentAllowed && !liveFault && !suppressCurrentSession
+            return liveInstrumentAllowed && liveConnectionReady
+                && !liveFault && !suppressCurrentSession
                 && Account != null && PositionAccount != null
                 && PositionAccount.MarketPosition == MarketPosition.Flat;
         }
@@ -160,6 +186,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             firstDirection = 0;
             lastExitBar = -1;
             entryPending = false;
+            missingOpenBarLogged = false;
             // liveFault deliberately persists until manual intervention.
         }
 
@@ -186,7 +213,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 if (State == State.Realtime)
                 {
-                    Log("ENTRY FILL: " + action + " qty=" + quantity
+                    Diag("ENTRY FILL: " + action + " qty=" + quantity
                         + " price=" + price.ToString("F2"));
                     if (liveInstrumentAllowed && !liveFault)
                     {
@@ -208,7 +235,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 marketPosition == MarketPosition.Flat)
             {
                 lastExitBar = CurrentBar;
-                Log("EXIT FILL: " + action + " qty=" + quantity
+                Diag("EXIT FILL: " + action + " qty=" + quantity
                     + " price=" + price.ToString("F2"));
             }
         }
@@ -233,11 +260,25 @@ namespace NinjaTrader.NinjaScript.Strategies
                 openingLow = Low[0];
                 suppressCurrentSession = false;
                 if (State == State.Realtime)
-                    Log("NY SESSION reset; instrumentAllowed=" + liveInstrumentAllowed);
+                    Diag("NY SESSION reset time=" + Time[0].ToString("HH:mm:ss")
+                        + " openingHigh=" + openingHigh.ToString("F2")
+                        + " openingLow=" + openingLow.ToString("F2")
+                        + " instrumentAllowed=" + liveInstrumentAllowed
+                        + " connectionReady=" + liveConnectionReady
+                        + " liveFault=" + liveFault, true);
             }
 
             if (openingBar < 0 || clock < 93500)
+            {
+                if (State == State.Realtime && clock >= 93500
+                    && clock <= 103000 && !missingOpenBarLogged)
+                {
+                    missingOpenBarLogged = true;
+                    Diag("BLOCKED: missing the 09:35 ET opening-range bar; "
+                        + "barTime=" + Time[0].ToString("HH:mm:ss"), true);
+                }
                 return;
+            }
 
             // VWAP approximation reset at the 09:30-09:35 NY candle.
             if (clock <= 160000)
@@ -245,6 +286,51 @@ namespace NinjaTrader.NinjaScript.Strategies
                 double typical = (High[0] + Low[0] + Close[0]) / 3.0;
                 sumPriceVolume += typical * Volume[0];
                 sumVolume += Volume[0];
+            }
+
+            // Live-only diagnostics: show each 5-minute bar through 10:30 ET,
+            // and any potential breakout later in the session. All signal
+            // calculations and historical orders below are unchanged.
+            if (State == State.Realtime)
+            {
+                double diagnosticVwap = sumVolume > 0
+                    ? sumPriceVolume / sumVolume : double.NaN;
+                bool possibleLong = CurrentBar > openingBar && sumVolume > 0
+                    && Close[1] <= openingHigh && Close[0] > openingHigh
+                    && Close[0] > diagnosticVwap;
+                bool possibleShort = CurrentBar > openingBar && sumVolume > 0
+                    && Close[1] >= openingLow && Close[0] < openingLow
+                    && Close[0] < diagnosticVwap;
+
+                if ((clock >= 93500 && clock <= 103000)
+                    || possibleLong || possibleShort)
+                {
+                    Diag("BAR timeET=" + Time[0].ToString("HH:mm:ss")
+                        + " close=" + Close[0].ToString("F2")
+                        + " priorClose=" + Close[1].ToString("F2")
+                        + " openHi=" + openingHigh.ToString("F2")
+                        + " openLo=" + openingLow.ToString("F2")
+                        + " vwap=" + diagnosticVwap.ToString("F2")
+                        + " long=" + possibleLong + " short=" + possibleShort
+                        + " connReady=" + liveConnectionReady
+                        + " fault=" + liveFault
+                        + " startupBlocked=" + suppressCurrentSession
+                        + " acctFlat=" + (PositionAccount != null
+                            && PositionAccount.MarketPosition == MarketPosition.Flat)
+                        + " entryPending=" + entryPending
+                        + " entriesToday=" + entriesToday);
+                }
+
+                if ((possibleLong || possibleShort) && !RealtimeAccountSafe())
+                    Diag("BLOCKED breakout at " + Time[0].ToString("HH:mm:ss")
+                        + ": connectionReady=" + liveConnectionReady
+                        + ", instrumentAllowed=" + liveInstrumentAllowed
+                        + ", liveFault=" + liveFault
+                        + ", midSessionStartup=" + suppressCurrentSession
+                        + ", accountAvailable=" + (Account != null)
+                        + ", accountFlat=" + (PositionAccount != null
+                            && PositionAccount.MarketPosition == MarketPosition.Flat),
+                        true);
             }
 
             // Research-only NY cash-session flatten safeguard.
@@ -315,7 +401,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             // Skip rather than forcing one contract and exceeding the cap.
             if (quantity < 1)
+            {
+                if (State == State.Realtime)
+                    Diag("BLOCKED breakout: risk budget " + FixedRiskDollars
+                        + " cannot cover one contract; stopPoints="
+                        + risk.ToString("F2") + " perContractRisk="
+                        + plannedLossPerContract.ToString("F2"), true);
                 return;
+            }
 
             string entryName = direction == 1 ? "Long1" : "Short1";
             // NinjaTrader managed stop/target orders are OCO-linked.
@@ -334,6 +427,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             entriesToday++;
             if (entriesToday == 1)
                 firstDirection = direction;
+            if (State == State.Realtime)
+                Diag("SUBMIT " + entryName + " qty=" + quantity
+                    + " plannedEntry=" + plannedEntry.ToString("F2")
+                    + " stop=" + stop.ToString("F2")
+                    + " target=" + target.ToString("F2")
+                    + " plannedRisk=" + (plannedLossPerContract * quantity).ToString("F2"),
+                    true);
+
             if (direction == 1)
                 EnterLong(quantity, entryName);
             else

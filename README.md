@@ -47,3 +47,11 @@ and restart safeguards remain. See docs/SAFETY.md.
 
 **Not a deployment-ready or firm-rule-certified strategy.** NinjaTrader
 compilation and Sim101 runtime validation are required.
+
+
+## November 27 live-debug hotfix
+
+Fixed a transient-connection status bug that could block all subsequent live
+orders. Added concise realtime-only bar/signal/risk skip diagnostics in Output
+1 and key events in Control Center Log. **Does not alter historical trading
+signals or add session/account daily-loss settings.** See docs/SAFETY.md.

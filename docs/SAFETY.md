@@ -63,3 +63,43 @@ https://static.ninjatrader.com/support/helpGuides/nt8/realtimeerrorhandling.htm
 https://static.ninjatrader.com/support/helpGuides/nt8/connectionlosshandling.htm
 https://static.ninjatrader.com/support/helpGuides/nt8/onorderupdate.htm
 https://static.ninjatrader.com/support/helpGuides/nt8/closestrategy.htm
+
+
+## Connection-lock fix and live signal diagnostics (2026-11-27)
+
+The earlier strategy latched `liveFault=true` after **any** connection-status
+change, with no recovery path even for a brief transition. This update separates
+`liveConnectionReady` from `liveFault`. During a disconnected/connecting
+event it temporarily blocks new entries; on a subsequent event with both order
+and price statuses `Connected`, it resumes eligibility. A real order
+rejection/cancel still latches a separate manual-reconciliation lock.
+NinjaTrader's own `ConnectionLossHandling.StopStrategy` remains active for a
+sustained loss, and auto-restart attempts stay at zero. A platform-stopped
+strategy does not re-enable itself following recovery.
+
+**Diagnostic output (realtime only):**
+- Prints to NinjaScript **Output 1** on startup, 09:35 ET opening-range reset,
+  and each 5-minute completed candle from 09:35 through 10:30 ET.
+- Logs the bar time/close, previous close, opening high/low, approximate VWAP,
+  raw breakout conditions, live connection status, startup block, fault, account
+  flatness, pending entry and daily entry count.
+- Logs later qualifying breakout bars and signals blocked by live gates.
+- Logs when the chosen fixed-dollar risk is too low for **one MNQ contract**,
+  including required dollars per contract.
+- Logs strategy order submissions and fills, including planned risk.
+- Sends low-frequency **startup/session/connection changes, blocked breakout
+  signals, unaffordable signals and submitted orders** to Control Center Log
+  as `NinjaScript` events as well as the Output window. This makes the
+  diagnosis recoverable even when Output isn't open.
+
+The opening-range logic, 5m VWAP approximation, 0.5R stop/target rules,
+two-trades-per-day logic, per-trade planned risk sizing, and separate indicator
+remain unchanged. No additional entry-eligibility conditions were introduced.
+
+**For Monday 2026-11-30:** install the latest strategy, compile with F5,
+open Output 1, connect market data, enable the strategy on Sim101 **before
+09:30 ET** and keep NinjaTrader running. Check the Control Center Log for
+`[F1]` diagnostics if Output 1 is blank. Confirm there is an actual complete
+5-minute 09:35 bar. If a breakout appears but no order is sent, copy the
+`BAR`, `BLOCKED` or `SUBMIT` log lines. Don't change live safeguards
+or use a paid evaluation to diagnose.

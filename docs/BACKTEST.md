@@ -67,3 +67,12 @@ no separate live-order toggle, minimum account-equity or strategy-session
 loss-limit inputs. Original trade-level planned risk sizing and stop/target
 orders remain. The prop firm's daily loss restrictions are **not** enforced
 by this strategy; see docs/SAFETY.md before deployment.
+
+
+## Missed live-trade investigation
+
+The November 27 update logs realtime bars and skipped signals to NinjaScript
+**Output 1** and selected alerts to Control Center **Log**. The backtest
+signal code is unchanged. See `docs/SAFETY.md` for the diagnostic keywords
+and the Monday Sim101 setup. A historical next-bar fill at 09:45 normally
+reflects a 09:40 completed signal bar; compare **signal bars**, not fill time.
