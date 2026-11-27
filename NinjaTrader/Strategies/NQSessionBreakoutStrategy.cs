@@ -111,7 +111,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 + " " + message;
             Print(line);
             if (toControlCenter)
-                base.Log(line, LogLevel.Information);
+                Log(line, LogLevel.Information);
         }
 
         private void EmergencyStop(string reason)
